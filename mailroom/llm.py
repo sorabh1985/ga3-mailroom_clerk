@@ -13,6 +13,12 @@ import time
 import httpx
 
 MAX_CONTENT_CHARS = 300_000
+RECENT = []  # last few attempts in this process, for the ?diag=1 page
+
+
+def _note(model, status, t0):
+    RECENT.append({"model": model, "status": status, "seconds": round(time.monotonic() - t0, 1)})
+    del RECENT[:-12]
 
 
 class LLMError(Exception):
@@ -65,10 +71,12 @@ async def chat_json(system: str, user: str, deadline: float):
         effort = os.environ.get("LLM_REASONING_EFFORT", "low")
         if effort and effort != "off":
             body["reasoning_effort"] = effort
+        t_call = time.monotonic()
         try:
             async with httpx.AsyncClient(timeout=httpx.Timeout(remaining - 1, connect=5.0)) as c:
                 r = await c.post(f"{cfg['base_url']}/chat/completions",
                                  headers={"Authorization": f"Bearer {cfg['api_key']}"}, json=body)
+            _note(model, r.status_code, t_call)
             if r.status_code != 200:
                 last = LLMError(f"HTTP {r.status_code}: {r.text[:300]}")
                 if r.status_code == 429 or r.status_code >= 500:
@@ -83,5 +91,6 @@ async def chat_json(system: str, user: str, deadline: float):
                 raise LLMError("model output too large")
             return _extract_json(content)
         except (httpx.HTTPError, ValueError, KeyError, IndexError) as e:
+            _note(model, type(e).__name__, t_call)
             last = LLMError(f"{type(e).__name__}: {str(e)[:200]}")
     raise last or LLMError("deadline reached before model call")

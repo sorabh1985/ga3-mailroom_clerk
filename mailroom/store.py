@@ -34,9 +34,8 @@ class UpstashStore:
         last = None
         for attempt in range(3):
             try:
-                if True:
-                    c = self._client()
-                    r = await c.post(self.url, headers=self.headers, json=[str(a) for a in args])
+                c = self._client()
+                r = await c.post(self.url, headers=self.headers, json=[str(a) for a in args])
                 if r.status_code == 200:
                     return r.json().get("result")
                 last = f"HTTP {r.status_code}: {r.text[:200]}"
@@ -73,6 +72,17 @@ class UpstashStore:
 
     async def delete(self, key):
         await self._cmd("DEL", key)
+
+    async def sadd(self, key, *members):
+        if members:
+            await self._cmd("SADD", key, *members)
+
+    async def srem(self, key, *members):
+        if members:
+            await self._cmd("SREM", key, *members)
+
+    async def smembers(self, key):
+        return list(await self._cmd("SMEMBERS", key) or [])
 
 
 class SqliteStore:
@@ -126,6 +136,19 @@ class SqliteStore:
     async def delete(self, key):
         with self._conn() as c:
             c.execute("DELETE FROM kv WHERE k=?", (key,))
+
+    async def _set_json(self, key, fn):
+        cur = set(json.loads(await self.get(key) or "[]"))
+        await self.set(key, json.dumps(sorted(fn(cur))))
+
+    async def sadd(self, key, *members):
+        await self._set_json(key, lambda cur: cur | set(members))
+
+    async def srem(self, key, *members):
+        await self._set_json(key, lambda cur: cur - set(members))
+
+    async def smembers(self, key):
+        return json.loads(await self.get(key) or "[]")
 
 
 _store = None

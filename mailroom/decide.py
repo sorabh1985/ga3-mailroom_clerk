@@ -299,6 +299,43 @@ def _entry(d, core, dec):
                   "at": int(time.time()), "dossier": d})
 
 
+PENDING_SET = "pending:v1"
+
+
+async def pending_count():
+    return len(await get_store().smembers(PENDING_SET))
+
+
+async def warm(seconds=45.0, limit=40):
+    """Decide dossiers that earlier ran out of time, with no grader waiting. Results are cached,
+    so the next Check answers them instantly. Safe to call repeatedly."""
+    store = get_store()
+    keys = (await store.smembers(PENDING_SET))[:limit]
+    if not keys:
+        return {"pendingBefore": 0, "decided": 0, "stillPending": 0}
+    raws = await store.mget(["pend:" + k for k in keys])
+    groups = {}
+    stale = []
+    for k, raw in zip(keys, raws):
+        if not raw:
+            stale.append(k)
+            continue
+        item = json.loads(raw)
+        if cache_key(item["dossier"], item["allowed"]) != k:
+            stale.append(k)
+            continue
+        groups.setdefault(tuple(item["allowed"]), []).append(item["dossier"])
+    if stale:
+        await store.srem(PENDING_SET, *stale)
+    deadline = time.monotonic() + seconds
+    decided = 0
+    for allowed, ds in groups.items():
+        res = await decide_all(ds, list(allowed), deadline)
+        decided += sum(1 for v in res.values() if not v[1].startswith("fallback"))
+    left = await pending_count()
+    return {"pendingBefore": len(keys), "decided": decided, "stillPending": left}
+
+
 def cache_key(dossier, allowed):
     return f"dec:{PROMPT_VERSION}:{dossier_fingerprint(dossier)}:{digest(sorted(allowed))[:12]}"
 
@@ -319,6 +356,7 @@ async def decide_all(dossiers, allowed, deadline, decider=None):
     batch = max(1, int(os.environ.get("LLM_BATCH", "8")))
     sem = asyncio.Semaphore(max(1, int(os.environ.get("LLM_CONCURRENCY", "8"))))
     new_cache = {}
+    pending = {}
     t_start = time.monotonic()
     stats = {"dossiers": len(dossiers), "cached": len(dossiers) - len(todo), "calls": [], "outcomes": {}}
 
@@ -359,6 +397,7 @@ async def decide_all(dossiers, allowed, deadline, decider=None):
             except Gate as g:
                 last = feedback = str(g)
         results[d["dossierId"]] = (fallback(d, allowed), "fallback:" + (last or "")[:200])
+        pending[k] = dumps({"dossier": d, "allowed": list(allowed)})
 
     async def run_chunk(chunk):
         by_id, err = await call([d for d, _ in chunk])
@@ -384,6 +423,15 @@ async def decide_all(dossiers, allowed, deadline, decider=None):
     stats["seconds"] = rel()
     if new_cache:
         await store.mset(new_cache)
+    try:
+        if new_cache:
+            await store.srem(PENDING_SET, *new_cache.keys())
+        if pending:
+            await store.mset({"pend:" + k: v for k, v in pending.items()})
+            await store.sadd(PENDING_SET, *pending.keys())
+    except Exception:  # noqa: BLE001 - best effort
+        pass
+    stats["pendingAdded"] = len(pending)
     try:
         await store.set("diag:last", dumps(stats), ex=86400)
     except Exception:  # noqa: BLE001 - diagnostics are best-effort
