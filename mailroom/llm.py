@@ -23,8 +23,8 @@ def config():
     return {
         "base_url": os.environ.get("LLM_BASE_URL", "https://generativelanguage.googleapis.com/v1beta/openai").rstrip("/"),
         "api_key": os.environ.get("LLM_API_KEY") or os.environ.get("GEMINI_API_KEY", ""),
-        "model": os.environ.get("LLM_MODEL", "gemini-3.8-flash"),
-        "fallback_model": os.environ.get("LLM_FALLBACK_MODEL", "gemini-3.7-flash"),
+        "model": os.environ.get("LLM_MODEL", "gemini-3.6-flash"),
+        "fallback_model": os.environ.get("LLM_FALLBACK_MODEL", "gemini-3.8-flash"),
         "reasoning_effort": os.environ.get("LLM_REASONING_EFFORT", "low"),
         "max_tokens": int(os.environ.get("LLM_MAX_TOKENS", "16000")),
     }
@@ -71,8 +71,8 @@ async def chat_json(system: str, user: str, deadline: float):
                                  headers={"Authorization": f"Bearer {cfg['api_key']}"}, json=body)
             if r.status_code != 200:
                 last = LLMError(f"HTTP {r.status_code}: {r.text[:300]}")
-                if r.status_code == 429:
-                    use_fallback = True  # free-tier quota hit: switch to the lighter model
+                if r.status_code == 429 or r.status_code >= 500:
+                    use_fallback = not use_fallback  # quota hit or model overloaded: alternate models
                 if r.status_code in (400, 401, 403, 404) and "reasoning" in r.text.lower() and "reasoning_effort" in body:
                     os.environ["LLM_REASONING_EFFORT"] = "off"  # provider does not support it
                 await asyncio.sleep(min(2.0 * (attempt + 1), max(0.0, deadline - time.monotonic() - 3)))
