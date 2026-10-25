@@ -44,11 +44,23 @@ def ekey(evaluation_id, part):
 @app.api_route("/{path:path}", methods=["GET", "HEAD"])
 async def health(path: str):
     s = get_store()
-    from .llm import config
-    cfg = config()
-    return jresp({"ok": True, "service": "mailroom-action-gate", "profile": PROFILE,
-                  "store": s.kind, "model": cfg["model"], "modelConfigured": bool(cfg["api_key"]),
-                  "promptVersion": decide_mod.PROMPT_VERSION})
+    from . import llm
+    cfg = llm.config()
+    info = {"ok": True, "service": "mailroom-action-gate", "profile": PROFILE,
+            "store": s.kind, "model": cfg["model"], "modelConfigured": bool(cfg["api_key"]),
+            "promptVersion": decide_mod.PROMPT_VERSION}
+    if path.rstrip("/").endswith("diag"):
+        # One tiny live model call so configuration problems show up before a Check.
+        t = time.monotonic()
+        try:
+            out = await llm.chat_json('Reply with the JSON object {"pong": true} and nothing else.',
+                                      "ping", time.monotonic() + 40)
+            info["modelTest"] = {"ok": out.get("pong") is True, "reply": out, "seconds": round(time.monotonic() - t, 1)}
+        except Exception as e:  # noqa: BLE001
+            info["modelTest"] = {"ok": False, "error": str(e)[:600], "seconds": round(time.monotonic() - t, 1)}
+        info["reasoningEffort"] = os.environ.get("LLM_REASONING_EFFORT", "low")
+        info["baseUrl"] = cfg["base_url"]
+    return jresp(info)
 
 
 @app.api_route("/{path:path}", methods=["PUT", "PATCH", "DELETE", "OPTIONS"])
