@@ -65,13 +65,21 @@ def b64url_decode(s: str) -> bytes:
 
 
 def b64_decode_sig(s: str) -> bytes:
+    """Strict decoding: the text must be the canonical base64 (or base64url) spelling of the bytes.
+    Non-canonical spellings that decode to the same bytes are treated as tampering."""
     if not isinstance(s, str) or not s:
         raise ValueError("missing")
     try:
-        return base64.b64decode(s, validate=True)
+        raw = base64.b64decode(s, validate=True)
+        if base64.b64encode(raw).decode() == s:
+            return raw
     except (binascii.Error, ValueError):
         pass
-    return b64url_decode(s)
+    raw = b64url_decode(s)
+    enc = base64.urlsafe_b64encode(raw).decode()
+    if s in (enc, enc.rstrip("=")):
+        return raw
+    raise ValueError("non-canonical base64 signature")
 
 
 def validate_envelope(obj):
