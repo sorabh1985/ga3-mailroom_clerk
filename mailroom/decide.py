@@ -319,18 +319,50 @@ async def decide_all(dossiers, allowed, deadline, decider=None):
     batch = max(1, int(os.environ.get("LLM_BATCH", "8")))
     sem = asyncio.Semaphore(max(1, int(os.environ.get("LLM_CONCURRENCY", "8"))))
     new_cache = {}
-    retry = []
+    t_start = time.monotonic()
+    stats = {"dossiers": len(dossiers), "cached": len(dossiers) - len(todo), "calls": [], "outcomes": {}}
 
-    async def run_chunk(chunk):
+    def rel():
+        return round(time.monotonic() - t_start, 1)
+
+    async def call(ds, feedback=None):
+        t = rel()
         async with sem:
+            t_in = rel()
             try:
-                return await ask([d for d, _ in chunk], deadline), None
-            except Exception as e:  # noqa: BLE001 - any model failure is handled below
+                out = await ask(ds, deadline, feedback)
+                stats["calls"].append({"n": len(ds), "retry": bool(feedback), "queued": t, "start": t_in, "end": rel(), "ok": True})
+                return out, None
+            except Exception as e:  # noqa: BLE001 - any model failure is handled by the caller
+                stats["calls"].append({"n": len(ds), "retry": bool(feedback), "queued": t, "start": t_in, "end": rel(),
+                                       "ok": False, "error": str(e)[:300]})
                 return {}, str(e)
 
-    chunks = [todo[i:i + batch] for i in range(0, len(todo), batch)]
-    outs = await asyncio.gather(*(run_chunk(c) for c in chunks))
-    for chunk, (by_id, err) in zip(chunks, outs):
+    async def single(d, k, why, had_answer):
+        """Re-ask one dossier (with the validator's reason) as soon as its batch answer was rejected."""
+        feedback = why if had_answer else None
+        last = why
+        for _ in range(2):
+            if deadline - time.monotonic() < 6:
+                last = f"no time left for retry (after: {last})"
+                break
+            by_id, err = await call([d], feedback)
+            dec = by_id.get(d["dossierId"]) or (next(iter(by_id.values())) if len(by_id) == 1 else None)
+            if dec is None:
+                last = err or "model returned no decision for this dossier"
+                continue
+            try:
+                core = gate(d, dec, allowed)
+                results[d["dossierId"]] = (core, "model-retry")
+                new_cache[k] = _entry(d, core, dec)
+                return
+            except Gate as g:
+                last = feedback = str(g)
+        results[d["dossierId"]] = (fallback(d, allowed), "fallback:" + (last or "")[:200])
+
+    async def run_chunk(chunk):
+        by_id, err = await call([d for d, _ in chunk])
+        retries = []
         for d, k in chunk:
             dec = by_id.get(d["dossierId"])
             try:
@@ -340,37 +372,20 @@ async def decide_all(dossiers, allowed, deadline, decider=None):
                 results[d["dossierId"]] = (core, "model")
                 new_cache[k] = _entry(d, core, dec)
             except Gate as g:
-                retry.append((d, k, str(g), dec is not None))
+                retries.append(single(d, k, str(g), dec is not None))
+        await asyncio.gather(*retries)  # pipelined: retries start as soon as this batch returns
 
-    async def run_single(d, k, why, had_answer):
-        feedback = why if had_answer else None
-        last = why
-        async with sem:
-            for _ in range(2):  # up to two single-dossier attempts, each with validator feedback
-                try:
-                    if deadline - time.monotonic() < 6:
-                        raise Gate("no time left for retry")
-                    by_id = await ask([d], deadline, feedback)
-                    dec = by_id.get(d["dossierId"]) or (next(iter(by_id.values())) if len(by_id) == 1 else None)
-                    if dec is None:
-                        raise Gate("model returned no decision for this dossier")
-                    core = gate(d, dec, allowed)
-                    return d, k, core, dec, None
-                except Gate as g:
-                    last = feedback = str(g)
-                    if "no time left" in last:
-                        break
-                except Exception as e:  # noqa: BLE001 - provider failure
-                    last = str(e)
-            return d, k, None, None, last
+    chunks = [todo[i:i + batch] for i in range(0, len(todo), batch)]
+    await asyncio.gather(*(run_chunk(c) for c in chunks))
 
-    for d, k, core, dec, err in await asyncio.gather(*(run_single(*r) for r in retry)):
-        if core is not None:
-            results[d["dossierId"]] = (core, "model-retry")
-            new_cache[k] = _entry(d, core, dec)
-        else:
-            results[d["dossierId"]] = (fallback(d, allowed), "fallback:" + (err or "")[:200])
-
+    for d in dossiers:
+        src = results[d["dossierId"]][1]
+        stats["outcomes"][d["dossierId"]] = {"action": results[d["dossierId"]][0]["action"], "source": src}
+    stats["seconds"] = rel()
     if new_cache:
         await store.mset(new_cache)
+    try:
+        await store.set("diag:last", dumps(stats), ex=86400)
+    except Exception:  # noqa: BLE001 - diagnostics are best-effort
+        pass
     return results

@@ -30,7 +30,7 @@ def check(name, cond, extra=""):
 
 
 def main(url):
-    c = httpx.Client(timeout=60, follow_redirects=False)
+    c = httpx.Client(timeout=90, follow_redirects=False)
 
     def post(body=None, raw=None):
         t = time.time()

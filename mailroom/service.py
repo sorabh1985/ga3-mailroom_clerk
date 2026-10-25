@@ -16,7 +16,7 @@ from .schema import (PROFILE, BadRequest, b64_decode_sig, b64url_decode, parse_j
                      validate_commit, validate_envelope, validate_propose)
 from .store import dumps, get_store
 
-CODE_VERSION = "2026-10-25c"
+CODE_VERSION = "2026-10-25d"
 MAX_BODY = 4 * 1024 * 1024
 MAX_RESPONSE = 512 * 1024
 PROPOSE_BUDGET = float(os.environ.get("PROPOSE_BUDGET_SECONDS", "46"))
@@ -60,6 +60,10 @@ async def health(path: str, request: Request):
         except Exception as e:  # noqa: BLE001
             info["modelTest"] = {"ok": False, "error": str(e)[:600], "seconds": round(time.monotonic() - t, 1)}
         info["reasoningEffort"] = os.environ.get("LLM_REASONING_EFFORT", "low")
+        t1 = time.monotonic()
+        last = await s.get("diag:last")
+        info["storeLatencyMs"] = round((time.monotonic() - t1) * 1000)
+        info["lastPropose"] = json.loads(last) if last else None
         info["baseUrl"] = cfg["base_url"]
     return jresp(info)
 
@@ -112,9 +116,11 @@ async def propose(obj, t0):
         rec = json.loads(existing)
         if rec["reqHash"] != req_hash:
             raise BadRequest(409, "conflict", "evaluationId already used with different content")
+        print(f"[propose] replay served from store in {time.monotonic() - t0:.2f}s")
         return jresp(rec["response"].encode("utf-8"))
 
     if not await store.set_nx(lock_key, req_hash, ex=120):
+        print("[propose] same evaluation already in progress; waiting for its stored result")
         holder = await store.get(lock_key)
         if holder and holder != req_hash:
             raise BadRequest(409, "conflict", "evaluationId already used with different content")
@@ -171,6 +177,7 @@ async def _propose_locked(obj, t0, store, ev_id, req_hash, rec_key):
     record = {"reqHash": req_hash, "response": resp_text, "inputDigest": response["inputDigest"],
               "jwk": obj["receiptVerifier"]["publicKeyJwk"], "index": index, "at": int(time.time())}
     await store.set(rec_key, dumps(record))  # persist before replying
+    print(f"[propose] stored and replying after {time.monotonic() - t0:.1f}s")
     return jresp(resp_text.encode("utf-8"))
 
 

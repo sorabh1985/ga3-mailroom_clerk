@@ -22,11 +22,20 @@ class UpstashStore:
         self.headers = {"Authorization": f"Bearer {token}"}
         self.kind = "upstash"
 
+    def _client(self):
+        # One keep-alive client per event loop: avoids a new TLS handshake for every command.
+        loop = asyncio.get_running_loop()
+        if getattr(self, "_loop", None) is not loop:
+            self._loop = loop
+            self._http = httpx.AsyncClient(timeout=8.0)
+        return self._http
+
     async def _cmd(self, *args):
         last = None
         for attempt in range(3):
             try:
-                async with httpx.AsyncClient(timeout=8.0) as c:
+                if True:
+                    c = self._client()
                     r = await c.post(self.url, headers=self.headers, json=[str(a) for a in args])
                 if r.status_code == 200:
                     return r.json().get("result")
