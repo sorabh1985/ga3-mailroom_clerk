@@ -29,6 +29,9 @@ def main():
     if len(sys.argv) < 2:
         sys.exit(__doc__)
     fresh = "--fresh" in sys.argv
+    # Free tiers limit requests and tokens per minute: send one batch at a time, smaller batches.
+    os.environ.setdefault("LLM_CONCURRENCY", "1")
+    os.environ.setdefault("LLM_BATCH", "8")
     here = os.path.dirname(os.path.abspath(__file__))
     gold = json.load(open(os.path.join(here, "gold.json")))
     items = json.load(open(sys.argv[1], encoding="utf-8"))["items"]
@@ -37,7 +40,21 @@ def main():
     print(f"{len(dossiers)} dossiers, store={store.kind}, model={os.environ.get('LLM_MODEL')}, "
           f"fallback={os.environ.get('LLM_FALLBACK_MODEL')}, prompt={decide.PROMPT_VERSION}")
     t = time.monotonic()
-    res = asyncio.run(decide.decide_all(dossiers, ACTIONS, time.monotonic() + 600, use_cache=not fresh))
+    res = asyncio.run(decide.decide_all(dossiers, ACTIONS, time.monotonic() + 900, use_cache=not fresh,
+                                        allow_provisional=False))
+    for rnd in range(6):  # free-tier per-minute limits: wait, then send only the cases still missing
+        missing = [d for d in dossiers if res[d["dossierId"]][1].startswith("fallback")]
+        if not missing:
+            break
+        why = res[missing[0]["dossierId"]][1]
+        if "PerDay" in why:
+            print("  daily model quota used up; try again after the daily reset.")
+            break
+        print(f"  {len(missing)} cases hit a limit ({why[9:120]}...). Waiting 65s, then retrying them.")
+        time.sleep(65)
+        more = asyncio.run(decide.decide_all(missing, ACTIONS, time.monotonic() + 900, use_cache=True,
+                                             allow_provisional=False))
+        res.update(more)
     print(f"done in {time.monotonic() - t:.0f}s\n")
 
     score = {"action": 0, "target+payload": 0, "evidence sufficient": 0, "evidence exact": 0, "fallback": 0}
@@ -57,11 +74,14 @@ def main():
     n = len(dossiers)
     for k, v in score.items():
         print(f"  {k:<22} {v}/{n}")
+    if score["fallback"]:
+        print("\n  Some cases hit a model limit. Wait a minute and run the same command again:")
+        print("  finished cases are kept, only the missing ones are sent.")
     print()
     for d, core, g, src in rows:
         lines = {l["lineId"]: l["text"] for s in d["sources"] for l in s["lines"]}
         print("=" * 100)
-        print(f"{d['dossierId']} [{d['partition']}] source={src[:80]}")
+        print(f"{d['dossierId']} [{d['partition']}] source={src[:300]}")
         if core["action"] != g["action"] or core["target"] != g["target"] or core["payload"] != g["payload"]:
             print(f"  got      {core['action']} {json.dumps(core['target'])} {json.dumps(core['payload'])}")
             print(f"  expected {g['action']} {json.dumps(g['target'])} {json.dumps(g['payload'])}")
