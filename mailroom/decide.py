@@ -360,8 +360,8 @@ async def decide_all(dossiers, allowed, deadline, decider=None, use_cache=True):
         else:
             todo.append((d, k))
 
-    batch = max(1, int(os.environ.get("LLM_BATCH", "16")))
-    sem = asyncio.Semaphore(max(1, int(os.environ.get("LLM_CONCURRENCY", "4"))))
+    batch = max(1, int(os.environ.get("LLM_BATCH", "11")))
+    sem = asyncio.Semaphore(max(1, int(os.environ.get("LLM_CONCURRENCY", "6"))))
     new_cache = {}
     pending = {}
     t_start = time.monotonic()
@@ -383,8 +383,9 @@ async def decide_all(dossiers, allowed, deadline, decider=None, use_cache=True):
                                        "ok": False, "error": str(e)[:300]})
                 return {}, str(e)
 
-    async def run_chunk(chunk):
+    async def run_chunk(chunk, idx=0):
         """One model call for the chunk; rejected answers are re-asked together (max 2 more calls)."""
+        llm.PREFER.set(idx)  # alternate chunks between the two models (separate free-tier quotas)
         remaining = list(chunk)
         reasons = {}          # dossierId -> validator reason (only when the model answered)
         last_err = {}
@@ -422,7 +423,7 @@ async def decide_all(dossiers, allowed, deadline, decider=None, use_cache=True):
 
     provisional = {}
     chunks = [todo[i:i + batch] for i in range(0, len(todo), batch)]
-    await asyncio.gather(*(run_chunk(c) for c in chunks))
+    await asyncio.gather(*(run_chunk(c, i) for i, c in enumerate(chunks)))
     if provisional:
         try:
             for k, core in provisional.items():

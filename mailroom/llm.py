@@ -5,6 +5,7 @@ Any other OpenAI-compatible free provider (Groq, OpenRouter, Cerebras...) works 
 changing LLM_BASE_URL / LLM_MODEL / LLM_API_KEY.
 """
 import asyncio
+import contextvars
 import json
 import os
 import re
@@ -14,6 +15,9 @@ import httpx
 
 MAX_CONTENT_CHARS = 300_000
 RECENT = []  # last few attempts in this process, for the ?diag=1 page
+# Which model a call starts with (0 = main, 1 = fallback). Spreading calls across both models
+# doubles the free-tier requests-per-minute and per-day allowance.
+PREFER = contextvars.ContextVar("prefer_model", default=0)
 
 
 def _note(model, status, t0):
@@ -61,7 +65,7 @@ async def chat_json(system: str, user: str, deadline: float):
         raise LLMError("no LLM API key configured")
     models = [cfg["model"]] + ([cfg["fallback_model"]] if cfg["fallback_model"] and cfg["fallback_model"] != cfg["model"] else [])
     last = None
-    use_fallback = False
+    use_fallback = bool(PREFER.get() % 2) and len(models) > 1
     for attempt in range(3):
         model = models[-1] if use_fallback else models[0]
         remaining = deadline - time.monotonic()
