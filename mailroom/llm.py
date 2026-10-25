@@ -21,6 +21,12 @@ def _note(model, status, t0):
     del RECENT[:-12]
 
 
+def _short(text):
+    """Keep the informative part of provider errors (quota id, retry delay)."""
+    keep = re.findall(r'"(?:message|quotaId|quotaMetric|retryDelay|quotaValue)":\s*"([^"]{0,200})"', text)
+    return (" | ".join(dict.fromkeys(keep)) or text)[:600]
+
+
 class LLMError(Exception):
     pass
 
@@ -78,9 +84,11 @@ async def chat_json(system: str, user: str, deadline: float):
                                  headers={"Authorization": f"Bearer {cfg['api_key']}"}, json=body)
             _note(model, r.status_code, t_call)
             if r.status_code != 200:
-                last = LLMError(f"HTTP {r.status_code}: {r.text[:300]}")
+                last = LLMError(f"HTTP {r.status_code}: {_short(r.text)}")
                 if r.status_code == 429 or r.status_code >= 500:
                     use_fallback = not use_fallback  # quota hit or model overloaded: alternate models
+                if r.status_code == 429 and "PerDay" in r.text:
+                    break  # daily quota is gone; no point retrying today
                 if r.status_code in (400, 401, 403, 404) and "reasoning" in r.text.lower() and "reasoning_effort" in body:
                     os.environ["LLM_REASONING_EFFORT"] = "off"  # provider does not support it
                 await asyncio.sleep(min(2.0 * (attempt + 1), max(0.0, deadline - time.monotonic() - 3)))

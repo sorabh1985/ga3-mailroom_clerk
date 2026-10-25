@@ -16,7 +16,7 @@ from .schema import (PROFILE, BadRequest, b64_decode_sig, b64url_decode, parse_j
                      validate_commit, validate_envelope, validate_propose)
 from .store import dumps, get_store
 
-CODE_VERSION = "2026-10-25e"
+CODE_VERSION = "2026-10-25f"
 MAX_BODY = 4 * 1024 * 1024
 MAX_RESPONSE = 512 * 1024
 PROPOSE_BUDGET = float(os.environ.get("PROPOSE_BUDGET_SECONDS", "46"))
