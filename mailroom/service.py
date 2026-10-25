@@ -16,6 +16,7 @@ from .schema import (PROFILE, BadRequest, b64_decode_sig, b64url_decode, parse_j
                      validate_commit, validate_envelope, validate_propose)
 from .store import dumps, get_store
 
+CODE_VERSION = "2026-10-25b"
 MAX_BODY = 4 * 1024 * 1024
 MAX_RESPONSE = 512 * 1024
 PROPOSE_BUDGET = float(os.environ.get("PROPOSE_BUDGET_SECONDS", "46"))
@@ -42,14 +43,14 @@ def ekey(evaluation_id, part):
 
 
 @app.api_route("/{path:path}", methods=["GET", "HEAD"])
-async def health(path: str):
+async def health(path: str, request: Request):
     s = get_store()
     from . import llm
     cfg = llm.config()
     info = {"ok": True, "service": "mailroom-action-gate", "profile": PROFILE,
             "store": s.kind, "model": cfg["model"], "modelConfigured": bool(cfg["api_key"]),
-            "promptVersion": decide_mod.PROMPT_VERSION}
-    if path.rstrip("/").endswith("diag"):
+            "promptVersion": decide_mod.PROMPT_VERSION, "codeVersion": CODE_VERSION}
+    if path.rstrip("/").endswith("diag") or "diag" in request.query_params:
         # One tiny live model call so configuration problems show up before a Check.
         t = time.monotonic()
         try:

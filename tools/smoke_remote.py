@@ -39,7 +39,7 @@ def main(url):
         return r, time.time() - t
 
     print("health:", c.get(url).text)
-    diag = c.get(url.rstrip("/") + "/diag").json().get("modelTest", {})
+    diag = c.get(url, params={"diag": "1"}).json().get("modelTest", {})
     check("live model call works", diag.get("ok") is True, json.dumps(diag)[:700])
     if not diag.get("ok"):
         print("\n  The model is not answering, so every decision would be a fallback. Fix this first.")
